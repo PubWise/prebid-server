@@ -6,17 +6,22 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/golang/glog"
-	"github.com/spf13/viper"
-	"golang.org/x/net/publicsuffix"
+	"github.com/mxmCherry/openrtb/v15/openrtb2"
+	"github.com/prebid/prebid-server/cache"
+	"github.com/prebid/prebid-server/config"
+	"github.com/prebid/prebid-server/stored_requests"
+	"github.com/prebid/prebid-server/usersync"
+	"github.com/prebid/prebid-server/util/httputil"
+	"github.com/prebid/prebid-server/util/iputil"
 
 	"github.com/blang/semver"
-	"github.com/mxmCherry/openrtb"
-	"github.com/prebid/prebid-server/cache"
-	"github.com/prebid/prebid-server/prebid"
+	"github.com/buger/jsonparser"
+	"github.com/golang/glog"
+	"golang.org/x/net/publicsuffix"
 )
 
 const MAX_BIDDERS = 8
@@ -79,18 +84,18 @@ type PBSVideo struct {
 }
 
 type AdUnit struct {
-	Code       string           `json:"code"`
-	TopFrame   int8             `json:"is_top_frame"`
-	Sizes      []openrtb.Format `json:"sizes"`
-	Bids       []Bids           `json:"bids"`
-	ConfigID   string           `json:"config_id"`
-	MediaTypes []string         `json:"media_types"`
-	Instl      int8             `json:"instl"`
-	Video      PBSVideo         `json:"video"`
+	Code       string            `json:"code"`
+	TopFrame   int8              `json:"is_top_frame"`
+	Sizes      []openrtb2.Format `json:"sizes"`
+	Bids       []Bids            `json:"bids"`
+	ConfigID   string            `json:"config_id"`
+	MediaTypes []string          `json:"media_types"`
+	Instl      int8              `json:"instl"`
+	Video      PBSVideo          `json:"video"`
 }
 
 type PBSAdUnit struct {
-	Sizes      []openrtb.Format
+	Sizes      []openrtb2.Format
 	TopFrame   int8
 	Code       string
 	BidID      string
@@ -116,15 +121,15 @@ type SDK struct {
 }
 
 type PBSBidder struct {
-	BidderCode   string         `json:"bidder"`
-	AdUnitCode   string         `json:"ad_unit,omitempty"` // for index to dedup responses
-	ResponseTime int            `json:"response_time_ms,omitempty"`
-	NumBids      int            `json:"num_bids,omitempty"`
-	Error        string         `json:"error,omitempty"`
-	NoCookie     bool           `json:"no_cookie,omitempty"`
-	NoBid        bool           `json:"no_bid,omitempty"`
-	UsersyncInfo *UsersyncInfo  `json:"usersync,omitempty"`
-	Debug        []*BidderDebug `json:"debug,omitempty"`
+	BidderCode   string                 `json:"bidder"`
+	AdUnitCode   string                 `json:"ad_unit,omitempty"` // for index to dedup responses
+	ResponseTime int                    `json:"response_time_ms,omitempty"`
+	NumBids      int                    `json:"num_bids,omitempty"`
+	Error        string                 `json:"error,omitempty"`
+	NoCookie     bool                   `json:"no_cookie,omitempty"`
+	NoBid        bool                   `json:"no_bid,omitempty"`
+	UsersyncInfo *usersync.UsersyncInfo `json:"usersync,omitempty"`
+	Debug        []*BidderDebug         `json:"debug,omitempty"`
 
 	AdUnits []PBSAdUnit `json:"-"`
 }
@@ -148,26 +153,27 @@ func (bidder *PBSBidder) LookupAdUnit(Code string) (unit *PBSAdUnit) {
 }
 
 type PBSRequest struct {
-	AccountID     string          `json:"account_id"`
-	Tid           string          `json:"tid"`
-	CacheMarkup   int8            `json:"cache_markup"`
-	SortBids      int8            `json:"sort_bids"`
-	MaxKeyLength  int8            `json:"max_key_length"`
-	Secure        int8            `json:"secure"`
-	TimeoutMillis int64           `json:"timeout_millis"`
-	AdUnits       []AdUnit        `json:"ad_units"`
-	IsDebug       bool            `json:"is_debug"`
-	App           *openrtb.App    `json:"app"`
-	Device        *openrtb.Device `json:"device"`
-	PBSUser       json.RawMessage `json:"user"`
-	SDK           *SDK            `json:"sdk"`
+	AccountID     string           `json:"account_id"`
+	Tid           string           `json:"tid"`
+	CacheMarkup   int8             `json:"cache_markup"`
+	SortBids      int8             `json:"sort_bids"`
+	MaxKeyLength  int8             `json:"max_key_length"`
+	Secure        int8             `json:"secure"`
+	TimeoutMillis int64            `json:"timeout_millis"`
+	AdUnits       []AdUnit         `json:"ad_units"`
+	IsDebug       bool             `json:"is_debug"`
+	App           *openrtb2.App    `json:"app"`
+	Device        *openrtb2.Device `json:"device"`
+	PBSUser       json.RawMessage  `json:"user"`
+	SDK           *SDK             `json:"sdk"`
 
 	// internal
-	Bidders []*PBSBidder  `json:"-"`
-	User    *openrtb.User `json:"-"`
-	Cookie  *PBSCookie    `json:"-"`
-	Url     string        `json:"-"`
-	Domain  string        `json:"-"`
+	Bidders []*PBSBidder        `json:"-"`
+	User    *openrtb2.User      `json:"-"`
+	Cookie  *usersync.PBSCookie `json:"-"`
+	Url     string              `json:"-"`
+	Domain  string              `json:"-"`
+	Regs    *openrtb2.Regs      `json:"-"`
 	Start   time.Time
 }
 
@@ -211,7 +217,9 @@ func ParseMediaTypes(types []string) []MediaType {
 	return mtypes
 }
 
-func ParsePBSRequest(r *http.Request, cache cache.Cache, hostCookieSettings *HostCookieSettings) (*PBSRequest, error) {
+var ipv4Validator iputil.IPValidator = iputil.VersionIPValidator{iputil.IPv4}
+
+func ParsePBSRequest(r *http.Request, cfg *config.AuctionTimeouts, cache cache.Cache, hostCookieConfig *config.HostCookie) (*PBSRequest, error) {
 	defer r.Body.Close()
 
 	pbsReq := &PBSRequest{}
@@ -225,14 +233,14 @@ func ParsePBSRequest(r *http.Request, cache cache.Cache, hostCookieSettings *Hos
 		return nil, fmt.Errorf("No ad units specified")
 	}
 
-	if pbsReq.TimeoutMillis == 0 || pbsReq.TimeoutMillis > 2000 {
-		pbsReq.TimeoutMillis = int64(viper.GetInt("default_timeout_ms"))
-	}
+	pbsReq.TimeoutMillis = int64(cfg.LimitAuctionTimeout(time.Duration(pbsReq.TimeoutMillis)*time.Millisecond) / time.Millisecond)
 
 	if pbsReq.Device == nil {
-		pbsReq.Device = &openrtb.Device{}
+		pbsReq.Device = &openrtb2.Device{}
 	}
-	pbsReq.Device.IP = prebid.GetIP(r)
+	if ip, _ := httputil.FindIP(r, ipv4Validator); ip != nil {
+		pbsReq.Device.IP = ip.String()
+	}
 
 	if pbsReq.SDK == nil {
 		pbsReq.SDK = &SDK{}
@@ -243,29 +251,20 @@ func ParsePBSRequest(r *http.Request, cache cache.Cache, hostCookieSettings *Hos
 	// To handle those traffic, adding a check here to ignore the sent gender for versions lower than 0.0.2.
 	v1, err := semver.Make(pbsReq.SDK.Version)
 	v2, err := semver.Make("0.0.2")
-	if v1.Compare(v2) >= 0 {
-		if pbsReq.PBSUser != nil {
-			err = json.Unmarshal([]byte(pbsReq.PBSUser), &pbsReq.User)
-			if err != nil {
-				return nil, err
-			}
+	if v1.Compare(v2) >= 0 && pbsReq.PBSUser != nil {
+		err = json.Unmarshal([]byte(pbsReq.PBSUser), &pbsReq.User)
+		if err != nil {
+			return nil, err
 		}
 	}
 
 	if pbsReq.User == nil {
-		pbsReq.User = &openrtb.User{}
+		pbsReq.User = &openrtb2.User{}
 	}
 
 	// use client-side data for web requests
 	if pbsReq.App == nil {
-		pbsReq.Cookie = ParsePBSCookieFromRequest(r, &(hostCookieSettings.OptOutCookie))
-
-		// Host has right to leverage private cookie store for user ID
-		if uid, _, _ := pbsReq.Cookie.GetUID(hostCookieSettings.Family); uid == "" && hostCookieSettings.CookieName != "" {
-			if hostCookie, err := r.Cookie(hostCookieSettings.CookieName); err == nil {
-				pbsReq.Cookie.TrySync(hostCookieSettings.Family, hostCookie.Value)
-			}
-		}
+		pbsReq.Cookie = usersync.ParsePBSCookieFromRequest(r, hostCookieConfig)
 
 		pbsReq.Device.UA = r.Header.Get("User-Agent")
 
@@ -297,7 +296,7 @@ func ParsePBSRequest(r *http.Request, cache cache.Cache, hostCookieSettings *Hos
 		pbsReq.IsDebug = true
 	}
 
-	if prebid.IsSecure(r) {
+	if httputil.IsSecure(r) {
 		pbsReq.Secure = 1
 	}
 
@@ -308,8 +307,10 @@ func ParsePBSRequest(r *http.Request, cache cache.Cache, hostCookieSettings *Hos
 		if unit.ConfigID != "" {
 			bidders, err = ConfigGet(cache, unit.ConfigID)
 			if err != nil {
+				if _, notFound := err.(*stored_requests.NotFoundError); !notFound {
+					glog.Warningf("Failed to load config '%s' from cache: %v", unit.ConfigID, err)
+				}
 				// proceed with other ad units
-				glog.Warningf("Failed to load config '%s' from cache: %v", unit.ConfigID, err)
 				continue
 			}
 		}
@@ -321,19 +322,14 @@ func ParsePBSRequest(r *http.Request, cache cache.Cache, hostCookieSettings *Hos
 		mtypes := ParseMediaTypes(unit.MediaTypes)
 		for _, b := range bidders {
 			var bidder *PBSBidder
-			// index requires a different request for each ad unit
-			if b.BidderCode != "indexExchange" {
-				for _, pb := range pbsReq.Bidders {
-					if pb.BidderCode == b.BidderCode {
-						bidder = pb
-					}
+			for _, pb := range pbsReq.Bidders {
+				if pb.BidderCode == b.BidderCode {
+					bidder = pb
 				}
 			}
+
 			if bidder == nil {
 				bidder = &PBSBidder{BidderCode: b.BidderCode}
-				if b.BidderCode == "indexExchange" {
-					bidder.AdUnitCode = unit.Code
-				}
 				pbsReq.Bidders = append(pbsReq.Bidders, bidder)
 			}
 			if b.BidID == "" {
@@ -365,4 +361,37 @@ func (req PBSRequest) Elapsed() int {
 func (p PBSRequest) String() string {
 	b, _ := json.MarshalIndent(p, "", "    ")
 	return string(b)
+}
+
+// parses the "Regs.ext.gdpr" from the request, if it exists. Otherwise returns an empty string.
+func (req *PBSRequest) ParseGDPR() string {
+	if req == nil || req.Regs == nil || len(req.Regs.Ext) == 0 {
+		return ""
+	}
+	val, err := jsonparser.GetInt(req.Regs.Ext, "gdpr")
+	if err != nil {
+		return ""
+	}
+	gdpr := strconv.Itoa(int(val))
+
+	return gdpr
+}
+
+// parses the "User.ext.consent" from the request, if it exists. Otherwise returns an empty string.
+func (req *PBSRequest) ParseConsent() string {
+	if req == nil || req.User == nil {
+		return ""
+	}
+	return parseString(req.User.Ext, "consent")
+}
+
+func parseString(data []byte, key string) string {
+	if len(data) == 0 {
+		return ""
+	}
+	val, err := jsonparser.GetString(data, key)
+	if err != nil {
+		return ""
+	}
+	return val
 }

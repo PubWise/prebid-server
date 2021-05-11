@@ -1,73 +1,83 @@
 package pulsepoint
 
 import (
+	"encoding/json"
+	"net/http"
+	"testing"
+
+	"github.com/mxmCherry/openrtb/v15/openrtb2"
+	"github.com/prebid/prebid-server/adapters"
+	"github.com/prebid/prebid-server/openrtb_ext"
+
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"net/http"
 	"net/http/httptest"
-	"strings"
-	"testing"
 	"time"
 
-	"github.com/mxmCherry/openrtb"
-	"github.com/prebid/prebid-server/adapters"
+	"github.com/prebid/prebid-server/adapters/adapterstest"
 	"github.com/prebid/prebid-server/cache/dummycache"
 	"github.com/prebid/prebid-server/config"
 	"github.com/prebid/prebid-server/pbs"
+	"github.com/prebid/prebid-server/usersync"
 )
 
-/**
- * Represents a scaffolded PulsePoint OpenRTB service.
- */
-type PulsePointOrtbMockService struct {
-	Server         *httptest.Server
-	LastBidRequest *openrtb.BidRequest
+func TestJsonSamples(t *testing.T) {
+	bidder, buildErr := Builder(openrtb_ext.BidderPulsepoint, config.Adapter{
+		Endpoint: "http://bidder.pulsepoint.com"})
+
+	if buildErr != nil {
+		t.Fatalf("Builder returned unexpected error %v", buildErr)
+	}
+
+	adapterstest.RunJSONBidderTest(t, "pulsepointtest", bidder)
 }
+
+/////////////////////////////////
+// Legacy implementation: Start
+/////////////////////////////////
 
 /**
  * Verify adapter names are setup correctly.
  */
 func TestPulsePointAdapterNames(t *testing.T) {
-	adapter := NewPulsePointAdapter(adapters.DefaultHTTPAdapterConfig, "http://localhost/bid")
-	VerifyStringValue(adapter.Name(), "pulsepoint", t)
-	VerifyStringValue(adapter.FamilyName(), "pulsepoint", t)
+	adapter := NewPulsePointLegacyAdapter(adapters.DefaultHTTPAdapterConfig, "http://localhost/bid")
+	adapterstest.VerifyStringValue(adapter.Name(), "pulsepoint", t)
 }
 
 /**
  * Test required parameters not sent
  */
 func TestPulsePointRequiredBidParameters(t *testing.T) {
-	adapter := NewPulsePointAdapter(adapters.DefaultHTTPAdapterConfig, "http://localhost/bid")
+	adapter := NewPulsePointLegacyAdapter(adapters.DefaultHTTPAdapterConfig, "http://localhost/bid")
 	ctx := context.TODO()
 	req := SampleRequest(1, t)
 	bidder := req.Bidders[0]
 	// remove "ct" param and verify error message.
 	bidder.AdUnits[0].Params = json.RawMessage("{\"cp\": 2001, \"cf\": \"728X90\"}")
 	_, errTag := adapter.Call(ctx, req, bidder)
-	VerifyStringValue(errTag.Error(), "Missing TagId param ct", t)
+	adapterstest.VerifyStringValue(errTag.Error(), "Missing TagId param ct", t)
 	// remove "cp" param and verify error message.
 	bidder.AdUnits[0].Params = json.RawMessage("{\"ct\": 1001, \"cf\": \"728X90\"}")
 	_, errPub := adapter.Call(ctx, req, bidder)
-	VerifyStringValue(errPub.Error(), "Missing PublisherId param cp", t)
+	adapterstest.VerifyStringValue(errPub.Error(), "Missing PublisherId param cp", t)
 	// remove "cf" param and verify error message.
 	bidder.AdUnits[0].Params = json.RawMessage("{\"cp\": 2001, \"ct\": 1001}")
 	_, errSize := adapter.Call(ctx, req, bidder)
-	VerifyStringValue(errSize.Error(), "Missing AdSize param cf", t)
+	adapterstest.VerifyStringValue(errSize.Error(), "Missing AdSize param cf", t)
 	// invalid width parameter value for cf
 	bidder.AdUnits[0].Params = json.RawMessage("{\"ct\": 1001, \"cp\": 2001, \"cf\": \"aXb\"}")
 	_, errWidth := adapter.Call(ctx, req, bidder)
-	VerifyStringValue(errWidth.Error(), "Invalid Width param a", t)
+	adapterstest.VerifyStringValue(errWidth.Error(), "Invalid Width param a", t)
 	// invalid parameter values for cf
 	bidder.AdUnits[0].Params = json.RawMessage("{\"ct\": 1001, \"cp\": 2001, \"cf\": \"12Xb\"}")
 	_, errHeight := adapter.Call(ctx, req, bidder)
-	VerifyStringValue(errHeight.Error(), "Invalid Height param b", t)
+	adapterstest.VerifyStringValue(errHeight.Error(), "Invalid Height param b", t)
 	// invalid parameter values for cf
 	bidder.AdUnits[0].Params = json.RawMessage("{\"ct\": 1001, \"cp\": 2001, \"cf\": \"12-20\"}")
 	_, errAdSizeValue := adapter.Call(ctx, req, bidder)
-	VerifyStringValue(errAdSizeValue.Error(), "Invalid AdSize param 12-20", t)
+	adapterstest.VerifyStringValue(errAdSizeValue.Error(), "Invalid AdSize param 12-20", t)
 }
 
 /**
@@ -75,19 +85,17 @@ func TestPulsePointRequiredBidParameters(t *testing.T) {
  * Ensure the ct, cp, cf params are transformed and sent alright.
  */
 func TestPulsePointOpenRTBRequest(t *testing.T) {
-	service := CreateService(BidOnTags(""))
+	service := CreateService(adapterstest.BidOnTags(""))
 	server := service.Server
 	ctx := context.TODO()
 	req := SampleRequest(1, t)
 	bidder := req.Bidders[0]
-	adapter := NewPulsePointAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
+	adapter := NewPulsePointLegacyAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
 	adapter.Call(ctx, req, bidder)
-	fmt.Println(service.LastBidRequest)
-	VerifyIntValue(len(service.LastBidRequest.Imp), 1, t)
-	VerifyStringValue(service.LastBidRequest.Imp[0].TagID, "1001", t)
-	VerifyStringValue(service.LastBidRequest.Site.Publisher.ID, "2001", t)
-	VerifyIntValue(int(*service.LastBidRequest.Imp[0].Banner.W), 728, t)
-	VerifyIntValue(int(*service.LastBidRequest.Imp[0].Banner.H), 90, t)
+	adapterstest.VerifyIntValue(len(service.LastBidRequest.Imp), 1, t)
+	adapterstest.VerifyStringValue(service.LastBidRequest.Imp[0].TagID, "1001", t)
+	adapterstest.VerifyStringValue(service.LastBidRequest.Site.Publisher.ID, "2001", t)
+	adapterstest.VerifyBannerSize(service.LastBidRequest.Imp[0].Banner, 728, 90, t)
 }
 
 /**
@@ -95,21 +103,22 @@ func TestPulsePointOpenRTBRequest(t *testing.T) {
  */
 func TestPulsePointBiddingBehavior(t *testing.T) {
 	// setup server endpoint to return bid.
-	server := CreateService(BidOnTags("1001")).Server
+	server := CreateService(adapterstest.BidOnTags("1001")).Server
 	ctx := context.TODO()
 	req := SampleRequest(1, t)
 	bidder := req.Bidders[0]
-	adapter := NewPulsePointAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
+	adapter := NewPulsePointLegacyAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
 	bids, _ := adapter.Call(ctx, req, bidder)
 	// number of bids should be 1
-	VerifyIntValue(len(bids), 1, t)
-	VerifyStringValue(bids[0].AdUnitCode, "div-adunit-1", t)
-	VerifyStringValue(bids[0].BidderCode, "pulsepoint", t)
-	VerifyStringValue(bids[0].Adm, "<div>This is an Ad</div>", t)
-	VerifyStringValue(bids[0].Creative_id, "Cr-234", t)
-	VerifyIntValue(int(bids[0].Width), 728, t)
-	VerifyIntValue(int(bids[0].Height), 90, t)
-	VerifyIntValue(int(bids[0].Price*100), 210, t)
+	adapterstest.VerifyIntValue(len(bids), 1, t)
+	adapterstest.VerifyStringValue(bids[0].AdUnitCode, "div-adunit-1", t)
+	adapterstest.VerifyStringValue(bids[0].BidderCode, "pulsepoint", t)
+	adapterstest.VerifyStringValue(bids[0].Adm, "<div>This is an Ad</div>", t)
+	adapterstest.VerifyStringValue(bids[0].Creative_id, "Cr-234", t)
+	adapterstest.VerifyIntValue(int(bids[0].Width), 728, t)
+	adapterstest.VerifyIntValue(int(bids[0].Height), 90, t)
+	adapterstest.VerifyIntValue(int(bids[0].Price*100), 210, t)
+	adapterstest.VerifyStringValue(bids[0].CreativeMediaType, string(openrtb_ext.BidTypeBanner), t)
 }
 
 /**
@@ -117,18 +126,18 @@ func TestPulsePointBiddingBehavior(t *testing.T) {
  */
 func TestPulsePointMultiImpPartialBidding(t *testing.T) {
 	// setup server endpoint to return bid.
-	service := CreateService(BidOnTags("1001"))
+	service := CreateService(adapterstest.BidOnTags("1001"))
 	server := service.Server
 	ctx := context.TODO()
 	req := SampleRequest(2, t)
 	bidder := req.Bidders[0]
-	adapter := NewPulsePointAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
+	adapter := NewPulsePointLegacyAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
 	bids, _ := adapter.Call(ctx, req, bidder)
 	// two impressions sent.
 	// number of bids should be 1
-	VerifyIntValue(len(service.LastBidRequest.Imp), 2, t)
-	VerifyIntValue(len(bids), 1, t)
-	VerifyStringValue(bids[0].AdUnitCode, "div-adunit-1", t)
+	adapterstest.VerifyIntValue(len(service.LastBidRequest.Imp), 2, t)
+	adapterstest.VerifyIntValue(len(bids), 1, t)
+	adapterstest.VerifyStringValue(bids[0].AdUnitCode, "div-adunit-1", t)
 }
 
 /**
@@ -136,17 +145,17 @@ func TestPulsePointMultiImpPartialBidding(t *testing.T) {
  */
 func TestPulsePointMultiImpPassback(t *testing.T) {
 	// setup server endpoint to return bid.
-	service := CreateService(BidOnTags(""))
+	service := CreateService(adapterstest.BidOnTags(""))
 	server := service.Server
 	ctx := context.TODO()
 	req := SampleRequest(2, t)
 	bidder := req.Bidders[0]
-	adapter := NewPulsePointAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
+	adapter := NewPulsePointLegacyAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
 	bids, _ := adapter.Call(ctx, req, bidder)
 	// two impressions sent.
 	// number of bids should be 1
-	VerifyIntValue(len(service.LastBidRequest.Imp), 2, t)
-	VerifyIntValue(len(bids), 0, t)
+	adapterstest.VerifyIntValue(len(service.LastBidRequest.Imp), 2, t)
+	adapterstest.VerifyIntValue(len(bids), 0, t)
 }
 
 /**
@@ -154,19 +163,19 @@ func TestPulsePointMultiImpPassback(t *testing.T) {
  */
 func TestPulsePointMultiImpAllBid(t *testing.T) {
 	// setup server endpoint to return bid.
-	service := CreateService(BidOnTags("1001,1002"))
+	service := CreateService(adapterstest.BidOnTags("1001,1002"))
 	server := service.Server
 	ctx := context.TODO()
 	req := SampleRequest(2, t)
 	bidder := req.Bidders[0]
-	adapter := NewPulsePointAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
+	adapter := NewPulsePointLegacyAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
 	bids, _ := adapter.Call(ctx, req, bidder)
 	// two impressions sent.
 	// number of bids should be 1
-	VerifyIntValue(len(service.LastBidRequest.Imp), 2, t)
-	VerifyIntValue(len(bids), 2, t)
-	VerifyStringValue(bids[0].AdUnitCode, "div-adunit-1", t)
-	VerifyStringValue(bids[1].AdUnitCode, "div-adunit-2", t)
+	adapterstest.VerifyIntValue(len(service.LastBidRequest.Imp), 2, t)
+	adapterstest.VerifyIntValue(len(bids), 2, t)
+	adapterstest.VerifyStringValue(bids[0].AdUnitCode, "div-adunit-1", t)
+	adapterstest.VerifyStringValue(bids[1].AdUnitCode, "div-adunit-2", t)
 }
 
 /**
@@ -174,51 +183,23 @@ func TestPulsePointMultiImpAllBid(t *testing.T) {
  */
 func TestMobileAppRequest(t *testing.T) {
 	// setup server endpoint to return bid.
-	service := CreateService(BidOnTags("1001"))
+	service := CreateService(adapterstest.BidOnTags("1001"))
 	server := service.Server
 	ctx := context.TODO()
 	req := SampleRequest(1, t)
-	req.App = &openrtb.App{
+	req.App = &openrtb2.App{
 		ID:   "com.facebook.katana",
 		Name: "facebook",
 	}
 	bidder := req.Bidders[0]
-	adapter := NewPulsePointAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
+	adapter := NewPulsePointLegacyAdapter(adapters.DefaultHTTPAdapterConfig, server.URL)
 	bids, _ := adapter.Call(ctx, req, bidder)
 	// one mobile app impression sent.
 	// verify appropriate fields are sent to pulsepoint endpoint.
-	VerifyIntValue(len(service.LastBidRequest.Imp), 1, t)
-	VerifyStringValue(service.LastBidRequest.App.ID, "com.facebook.katana", t)
-	VerifyIntValue(len(bids), 1, t)
-	VerifyStringValue(bids[0].AdUnitCode, "div-adunit-1", t)
-}
-
-/**
- * Produces a map of TagIds, based on a comma separated strings. The map
- * contains the list of tags to bid on.
- */
-func BidOnTags(tags string) map[string]bool {
-	values := strings.Split(tags, ",")
-	set := make(map[string]bool)
-	for _, tag := range values {
-		set[tag] = true
-	}
-	return set
-}
-
-/**
- * Produces a sample bid based on params given.
- */
-func SampleBid(width int, height int, impId string, index int) openrtb.Bid {
-	return openrtb.Bid{
-		ID:    "Bid-123",
-		ImpID: fmt.Sprintf("div-adunit-%d", index),
-		Price: 2.1,
-		AdM:   "<div>This is an Ad</div>",
-		CrID:  "Cr-234",
-		W:     728,
-		H:     90,
-	}
+	adapterstest.VerifyIntValue(len(service.LastBidRequest.Imp), 1, t)
+	adapterstest.VerifyStringValue(service.LastBidRequest.App.ID, "com.facebook.katana", t)
+	adapterstest.VerifyIntValue(len(bids), 1, t)
+	adapterstest.VerifyStringValue(bids[0].AdUnitCode, "div-adunit-1", t)
 }
 
 /**
@@ -234,7 +215,7 @@ func SampleRequest(numberOfImpressions int, t *testing.T) *pbs.PBSRequest {
 	for i := 0; i < numberOfImpressions; i++ {
 		req.AdUnits[i] = pbs.AdUnit{
 			Code: fmt.Sprintf("div-adunit-%d", i+1),
-			Sizes: []openrtb.Format{
+			Sizes: []openrtb2.Format{
 				{
 					W: 10,
 					H: 12,
@@ -256,18 +237,22 @@ func SampleRequest(numberOfImpressions int, t *testing.T) *pbs.PBSRequest {
 		t.Fatalf("Error when serializing request")
 	}
 	// setup a http request
-	httpReq := httptest.NewRequest("POST", CreateService(BidOnTags("")).Server.URL, body)
+	httpReq := httptest.NewRequest("POST", CreateService(adapterstest.BidOnTags("")).Server.URL, body)
 	httpReq.Header.Add("Referer", "http://news.pub/topnews")
-	pc := pbs.ParsePBSCookieFromRequest(httpReq, &config.Cookie{})
+	pc := usersync.ParsePBSCookieFromRequest(httpReq, &config.HostCookie{})
 	pc.TrySync("pulsepoint", "pulsepointUser123")
 	fakewriter := httptest.NewRecorder()
-	pc.SetCookieOnResponse(fakewriter, "", 90*24*time.Hour)
+
+	pc.SetCookieOnResponse(fakewriter, false, &config.HostCookie{Domain: ""}, 90*24*time.Hour)
 	httpReq.Header.Add("Cookie", fakewriter.Header().Get("Set-Cookie"))
 	// parse the http request
 	cacheClient, _ := dummycache.New()
-	hcs := pbs.HostCookieSettings{}
+	hcs := config.HostCookie{}
 
-	parsedReq, err := pbs.ParsePBSRequest(httpReq, cacheClient, &hcs)
+	parsedReq, err := pbs.ParsePBSRequest(httpReq, &config.AuctionTimeouts{
+		Default: 2000,
+		Max:     2000,
+	}, cacheClient, &hcs)
 	if err != nil {
 		t.Fatalf("Error when parsing request: %v", err)
 	}
@@ -278,9 +263,9 @@ func SampleRequest(numberOfImpressions int, t *testing.T) *pbs.PBSRequest {
  * Represents a mock ORTB endpoint of PulsePoint. Would return a bid
  * for TagId 1001 and passback for 1002 as the default behavior.
  */
-func CreateService(tagsToBid map[string]bool) PulsePointOrtbMockService {
-	service := PulsePointOrtbMockService{}
-	var lastBidRequest openrtb.BidRequest
+func CreateService(tagsToBid map[string]bool) adapterstest.OrtbMockService {
+	service := adapterstest.OrtbMockService{}
+	var lastBidRequest openrtb2.BidRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		body, err := ioutil.ReadAll(r.Body)
@@ -288,26 +273,26 @@ func CreateService(tagsToBid map[string]bool) PulsePointOrtbMockService {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		var breq openrtb.BidRequest
+		var breq openrtb2.BidRequest
 		err = json.Unmarshal(body, &breq)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		lastBidRequest = breq
-		var bids []openrtb.Bid
+		var bids []openrtb2.Bid
 		for i, imp := range breq.Imp {
 			if tagsToBid[imp.TagID] {
-				bids = append(bids, SampleBid(int(*imp.Banner.W), int(*imp.Banner.H), imp.ID, i+1))
+				bids = append(bids, adapterstest.SampleBid(imp.Banner.W, imp.Banner.H, imp.ID, i+1))
 			}
 		}
 		// no bids were produced, pulsepoint service returns 204
 		if len(bids) == 0 {
 			w.WriteHeader(204)
 		} else {
-			// serialize the bids to openrtb.BidResponse
-			js, _ := json.Marshal(openrtb.BidResponse{
-				SeatBid: []openrtb.SeatBid{
+			// serialize the bids to openrtb2.BidResponse
+			js, _ := json.Marshal(openrtb2.BidResponse{
+				SeatBid: []openrtb2.SeatBid{
 					{
 						Bid: bids,
 					},
@@ -322,20 +307,6 @@ func CreateService(tagsToBid map[string]bool) PulsePointOrtbMockService {
 	return service
 }
 
-/**
- * Helper function to assert string equals.
- */
-func VerifyStringValue(value string, expected string, t *testing.T) {
-	if value != expected {
-		t.Fatalf(fmt.Sprintf("%s expected, got %s", expected, value))
-	}
-}
-
-/**
- * Helper function to assert Int equals.
- */
-func VerifyIntValue(value int, expected int, t *testing.T) {
-	if value != expected {
-		t.Fatalf(fmt.Sprintf("%d expected, got %d", expected, value))
-	}
-}
+/////////////////////////////////
+// Legacy implementation: End
+/////////////////////////////////

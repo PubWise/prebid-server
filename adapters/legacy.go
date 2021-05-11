@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/prebid/prebid-server/pbs"
-	"github.com/prebid/prebid-server/ssl"
+	"github.com/prebid/prebid-server/server/ssl"
 )
 
 // This file contains some deprecated, legacy types.
@@ -19,18 +19,18 @@ import (
 // PBS is currently being rewritten to use Bidder, and this will be removed after.
 // Their primary purpose is to produce bids in response to Auction requests.
 type Adapter interface {
-	// Name uniquely identifies this adapter. This must be identical to the code in Prebid.js,
-	// but cannot overlap with any other adapters in prebid-server.
+	// Name must be identical to the BidderName.
 	Name() string
-	// FamilyName identifies the space of cookies which this adapter accesses. For example, an adapter
-	// using the adnxs.com cookie space should return "adnxs".
-	FamilyName() string
-	// Determines whether this adapter should get callouts if there is not a synched user ID
+	// Determines whether this adapter should get callouts if there is not a synched user ID.
 	SkipNoCookies() bool
 	// Call produces bids which should be considered, given the auction params.
 	//
 	// In practice, implementations almost always make one call to an external server here.
 	// However, that is not a requirement for satisfying this interface.
+	//
+	// An error here will cause all bids to be ignored. If the error was caused by bad user input,
+	// this should return a BadInputError. If it was caused by bad server behavior
+	// (e.g. 500, unexpected response format, etc), this should return a BadServerResponseError.
 	Call(ctx context.Context, req *pbs.PBSRequest, bidder *pbs.PBSBidder) (pbs.PBSBidSlice, error)
 }
 
@@ -81,17 +81,12 @@ type CallOneResult struct {
 }
 
 type MisconfiguredAdapter struct {
-	TheName       string
-	TheFamilyName string
-	Err           error
+	TheName string
+	Err     error
 }
 
 func (b *MisconfiguredAdapter) Name() string {
 	return b.TheName
-}
-
-func (b *MisconfiguredAdapter) FamilyName() string {
-	return b.TheFamilyName
 }
 func (b *MisconfiguredAdapter) SkipNoCookies() bool {
 	return false

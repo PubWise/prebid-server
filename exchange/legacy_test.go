@@ -2,59 +2,66 @@ package exchange
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/buger/jsonparser"
-	"github.com/evanphx/json-patch"
-	"github.com/mxmCherry/openrtb"
+	jsonpatch "github.com/evanphx/json-patch"
+	"github.com/mxmCherry/openrtb/v15/openrtb2"
+	"github.com/prebid/prebid-server/adapters"
+	"github.com/prebid/prebid-server/currency"
 	"github.com/prebid/prebid-server/openrtb_ext"
 	"github.com/prebid/prebid-server/pbs"
+	"github.com/prebid/prebid-server/usersync"
 )
 
 func TestSiteVideo(t *testing.T) {
-	ortbRequest := &openrtb.BidRequest{
+	ortbRequest := &openrtb2.BidRequest{
 		ID:   "request-id",
 		TMax: 1000,
-		Site: &openrtb.Site{
+		Site: &openrtb2.Site{
 			Page:   "http://www.site.com",
 			Domain: "site.com",
-			Publisher: &openrtb.Publisher{
+			Publisher: &openrtb2.Publisher{
 				ID: "b1c81a38-1415-42b7-8238-0d2d64016c27",
 			},
 		},
-		Source: &openrtb.Source{
+		Source: &openrtb2.Source{
 			TID: "transaction-id",
 		},
-		User: &openrtb.User{
+		User: &openrtb2.User{
 			ID:       "host-id",
 			BuyerUID: "bidder-id",
 		},
 		Test: 1,
-		Imp: []openrtb.Imp{{
+		Imp: []openrtb2.Imp{{
 			ID: "imp-id",
-			Video: &openrtb.Video{
+			Video: &openrtb2.Video{
 				MIMEs:       []string{"video/mp4"},
 				MinDuration: 20,
 				MaxDuration: 40,
-				Protocols:   []openrtb.Protocol{openrtb.ProtocolVAST10},
-				StartDelay:  openrtb.StartDelayGenericMidRoll.Ptr(),
+				Protocols:   []openrtb2.Protocol{openrtb2.ProtocolVAST10},
+				StartDelay:  openrtb2.StartDelayGenericMidRoll.Ptr(),
 			},
-			Banner: &openrtb.Banner{
-				Format: []openrtb.Format{{
+			Banner: &openrtb2.Banner{
+				Format: []openrtb2.Format{{
 					W: 300,
 					H: 250,
 				}},
 			},
-			Ext: openrtb.RawJSON(`{"bidder":{"cp":512379,"ct":486653,"cf":"300x250"}}`),
+			Ext: json.RawMessage(`{"bidder":{"cp":512379,"ct":486653,"cf":"300x250"}}`),
 		}},
 	}
 
 	mockAdapter := mockLegacyAdapter{}
 
 	exchangeBidder := adaptLegacyAdapter(&mockAdapter)
-	_, errs := exchangeBidder.requestBid(context.Background(), ortbRequest, nil, openrtb_ext.BidderRubicon)
+	currencyConverter := currency.NewRateConverter(&http.Client{}, "", time.Duration(0))
+	_, errs := exchangeBidder.requestBid(context.Background(), ortbRequest, openrtb_ext.BidderRubicon, 1.0, currencyConverter.Rates(), &adapters.ExtraRequestInfo{}, true)
 	if len(errs) > 0 {
 		t.Errorf("Unexpected error requesting bids: %v", errs)
 	}
@@ -78,7 +85,7 @@ func TestSiteVideo(t *testing.T) {
 func TestAppBanner(t *testing.T) {
 	ortbRequest := newAppOrtbRequest()
 	ortbRequest.TMax = 1000
-	ortbRequest.User = &openrtb.User{
+	ortbRequest.User = &openrtb2.User{
 		ID:       "host-id",
 		BuyerUID: "bidder-id",
 	}
@@ -87,7 +94,8 @@ func TestAppBanner(t *testing.T) {
 	mockAdapter := mockLegacyAdapter{}
 
 	exchangeBidder := adaptLegacyAdapter(&mockAdapter)
-	_, errs := exchangeBidder.requestBid(context.Background(), ortbRequest, nil, openrtb_ext.BidderRubicon)
+	currencyConverter := currency.NewRateConverter(&http.Client{}, "", time.Duration(0))
+	_, errs := exchangeBidder.requestBid(context.Background(), ortbRequest, openrtb_ext.BidderRubicon, 1.0, currencyConverter.Rates(), &adapters.ExtraRequestInfo{}, true)
 	if len(errs) > 0 {
 		t.Errorf("Unexpected error requesting bids: %v", errs)
 	}
@@ -108,12 +116,14 @@ func TestAppBanner(t *testing.T) {
 }
 
 func TestBidTransforms(t *testing.T) {
+	bidAdjustment := 0.3
+	initialBidPrice := 0.5
 	legalBid := &pbs.PBSBid{
 		BidID:             "bid-1",
 		AdUnitCode:        "adunit-1",
 		Creative_id:       "creative-1",
 		CreativeMediaType: "banner",
-		Price:             0.5,
+		Price:             initialBidPrice,
 		NURL:              "nurl",
 		Adm:               "ad-markup",
 		Width:             10,
@@ -130,7 +140,8 @@ func TestBidTransforms(t *testing.T) {
 	}
 
 	exchangeBidder := adaptLegacyAdapter(&mockAdapter)
-	seatBid, errs := exchangeBidder.requestBid(context.Background(), newAppOrtbRequest(), nil, openrtb_ext.BidderRubicon)
+	currencyConverter := currency.NewRateConverter(&http.Client{}, "", time.Duration(0))
+	seatBid, errs := exchangeBidder.requestBid(context.Background(), newAppOrtbRequest(), openrtb_ext.BidderRubicon, bidAdjustment, currencyConverter.Rates(), &adapters.ExtraRequestInfo{}, true)
 	if len(errs) != 1 {
 		t.Fatalf("Bad error count. Expected 1, got %d", len(errs))
 	}
@@ -154,8 +165,8 @@ func TestBidTransforms(t *testing.T) {
 	if theBid.bid.CrID != legalBid.Creative_id {
 		t.Errorf("Bad creativeid. Expected %s, got %s", legalBid.Creative_id, theBid.bid.CrID)
 	}
-	if theBid.bid.Price != legalBid.Price {
-		t.Errorf("Bad price. Expected %f, got %f", legalBid.Price, theBid.bid.Price)
+	if theBid.bid.Price != initialBidPrice*bidAdjustment {
+		t.Errorf("Bad price. Expected %f, got %f", initialBidPrice*bidAdjustment, theBid.bid.Price)
 	}
 	if theBid.bid.NURL != legalBid.NURL {
 		t.Errorf("Bad NURL. Expected %s, got %s", legalBid.NURL, theBid.bid.NURL)
@@ -176,8 +187,8 @@ func TestBidTransforms(t *testing.T) {
 
 func TestInsecureImps(t *testing.T) {
 	insecure := int8(0)
-	bidReq := &openrtb.BidRequest{
-		Imp: []openrtb.Imp{{
+	bidReq := &openrtb2.BidRequest{
+		Imp: []openrtb2.Imp{{
 			Secure: &insecure,
 		}, {
 			Secure: &insecure,
@@ -194,8 +205,8 @@ func TestInsecureImps(t *testing.T) {
 
 func TestSecureImps(t *testing.T) {
 	secure := int8(1)
-	bidReq := &openrtb.BidRequest{
-		Imp: []openrtb.Imp{{
+	bidReq := &openrtb2.BidRequest{
+		Imp: []openrtb2.Imp{{
 			Secure: &secure,
 		}, {
 			Secure: &secure,
@@ -213,8 +224,8 @@ func TestSecureImps(t *testing.T) {
 func TestMixedSecureImps(t *testing.T) {
 	insecure := int8(0)
 	secure := int8(1)
-	bidReq := &openrtb.BidRequest{
-		Imp: []openrtb.Imp{{
+	bidReq := &openrtb2.BidRequest{
+		Imp: []openrtb2.Imp{{
 			Secure: &insecure,
 		}, {
 			Secure: &secure,
@@ -226,50 +237,50 @@ func TestMixedSecureImps(t *testing.T) {
 	}
 }
 
-func newAppOrtbRequest() *openrtb.BidRequest {
-	return &openrtb.BidRequest{
+func newAppOrtbRequest() *openrtb2.BidRequest {
+	return &openrtb2.BidRequest{
 		ID: "request-id",
-		App: &openrtb.App{
-			Publisher: &openrtb.Publisher{
+		App: &openrtb2.App{
+			Publisher: &openrtb2.Publisher{
 				ID: "b1c81a38-1415-42b7-8238-0d2d64016c27",
 			},
 		},
-		Source: &openrtb.Source{
+		Source: &openrtb2.Source{
 			TID: "transaction-id",
 		},
-		Imp: []openrtb.Imp{{
+		Imp: []openrtb2.Imp{{
 			ID: "imp-id",
-			Banner: &openrtb.Banner{
-				Format: []openrtb.Format{{
+			Banner: &openrtb2.Banner{
+				Format: []openrtb2.Format{{
 					W: 300,
 					H: 250,
 				}},
 			},
-			Ext: openrtb.RawJSON(`{"bidder":{"cp":512379,"ct":486653,"cf":"300x250"}}`),
+			Ext: json.RawMessage(`{"bidder":{"cp":512379,"ct":486653,"cf":"300x250"}}`),
 		}},
 	}
 }
 
 func TestErrorResponse(t *testing.T) {
-	ortbRequest := &openrtb.BidRequest{
+	ortbRequest := &openrtb2.BidRequest{
 		ID: "request-id",
-		App: &openrtb.App{
-			Publisher: &openrtb.Publisher{
+		App: &openrtb2.App{
+			Publisher: &openrtb2.Publisher{
 				ID: "b1c81a38-1415-42b7-8238-0d2d64016c27",
 			},
 		},
-		Source: &openrtb.Source{
+		Source: &openrtb2.Source{
 			TID: "transaction-id",
 		},
-		Imp: []openrtb.Imp{{
+		Imp: []openrtb2.Imp{{
 			ID: "imp-id",
-			Banner: &openrtb.Banner{
-				Format: []openrtb.Format{{
+			Banner: &openrtb2.Banner{
+				Format: []openrtb2.Format{{
 					W: 300,
 					H: 250,
 				}},
 			},
-			Ext: openrtb.RawJSON(`{"bidder":{"cp":512379,"ct":486653,"cf":"300x250"}}`),
+			Ext: json.RawMessage(`{"bidder":{"cp":512379,"ct":486653,"cf":"300x250"}}`),
 		}},
 	}
 
@@ -278,7 +289,8 @@ func TestErrorResponse(t *testing.T) {
 	}
 
 	exchangeBidder := adaptLegacyAdapter(&mockAdapter)
-	_, errs := exchangeBidder.requestBid(context.Background(), ortbRequest, nil, openrtb_ext.BidderRubicon)
+	currencyConverter := currency.NewRateConverter(&http.Client{}, "", time.Duration(0))
+	_, errs := exchangeBidder.requestBid(context.Background(), ortbRequest, openrtb_ext.BidderRubicon, 1.0, currencyConverter.Rates(), &adapters.ExtraRequestInfo{}, true)
 	if len(errs) != 1 {
 		t.Fatalf("Bad error count. Expected 1, got %d", len(errs))
 	}
@@ -288,25 +300,25 @@ func TestErrorResponse(t *testing.T) {
 }
 
 func TestWithTargeting(t *testing.T) {
-	ortbRequest := &openrtb.BidRequest{
+	ortbRequest := &openrtb2.BidRequest{
 		ID: "request-id",
-		App: &openrtb.App{
-			Publisher: &openrtb.Publisher{
+		App: &openrtb2.App{
+			Publisher: &openrtb2.Publisher{
 				ID: "b1c81a38-1415-42b7-8238-0d2d64016c27",
 			},
 		},
-		Source: &openrtb.Source{
+		Source: &openrtb2.Source{
 			TID: "transaction-id",
 		},
-		Imp: []openrtb.Imp{{
+		Imp: []openrtb2.Imp{{
 			ID: "imp-id",
-			Banner: &openrtb.Banner{
-				Format: []openrtb.Format{{
+			Banner: &openrtb2.Banner{
+				Format: []openrtb2.Format{{
 					W: 300,
 					H: 250,
 				}},
 			},
-			Ext: openrtb.RawJSON(`{"bidder": {"placementId": "1959066997713356_1959836684303054"}}`),
+			Ext: json.RawMessage(`{"bidder": {"placementId": "1959066997713356_1959836684303054"}}`),
 		}},
 	}
 
@@ -316,10 +328,8 @@ func TestWithTargeting(t *testing.T) {
 		}},
 	}
 	exchangeBidder := adaptLegacyAdapter(&mockAdapter)
-	targ := &targetData{
-		priceGranularity: openrtb_ext.PriceGranularityMedium,
-	}
-	bid, errs := exchangeBidder.requestBid(context.Background(), ortbRequest, targ, openrtb_ext.BidderFacebook)
+	currencyConverter := currency.NewRateConverter(&http.Client{}, "", time.Duration(0))
+	bid, errs := exchangeBidder.requestBid(context.Background(), ortbRequest, openrtb_ext.BidderAudienceNetwork, 1.0, currencyConverter.Rates(), &adapters.ExtraRequestInfo{}, true)
 	if len(errs) != 0 {
 		t.Fatalf("This should not produce errors. Got %v", errs)
 	}
@@ -333,7 +343,7 @@ func TestWithTargeting(t *testing.T) {
 
 // assertEquivalentFields compares the OpenRTB request with the legacy request, using the mappings defined here:
 // https://gist.github.com/dbemiller/68aa3387189fa17d3addfb9818dd4d97
-func assertEquivalentRequests(t *testing.T, req *openrtb.BidRequest, legacy *pbs.PBSRequest) {
+func assertEquivalentRequests(t *testing.T, req *openrtb2.BidRequest, legacy *pbs.PBSRequest) {
 	if req.Site != nil {
 		if req.Site.Publisher.ID != legacy.AccountID {
 			t.Errorf("Account ID did not translate. OpenRTB: %s, Legacy: %s.", req.Site.Publisher.ID, legacy.AccountID)
@@ -389,7 +399,7 @@ func assertEquivalentRequests(t *testing.T, req *openrtb.BidRequest, legacy *pbs
 	}
 }
 
-func assertEquivalentBidder(t *testing.T, req *openrtb.BidRequest, legacy *pbs.PBSBidder) {
+func assertEquivalentBidder(t *testing.T, req *openrtb2.BidRequest, legacy *pbs.PBSBidder) {
 	if len(req.Imp) != len(legacy.AdUnits) {
 		t.Errorf("Wrong number of Imps. Expected %d, got %d", len(req.Imp), len(legacy.AdUnits))
 		return
@@ -399,7 +409,7 @@ func assertEquivalentBidder(t *testing.T, req *openrtb.BidRequest, legacy *pbs.P
 	}
 }
 
-func assertEquivalentImp(t *testing.T, index int, imp *openrtb.Imp, legacy *pbs.PBSAdUnit) {
+func assertEquivalentImp(t *testing.T, index int, imp *openrtb2.Imp, legacy *pbs.PBSAdUnit) {
 	if imp.ID != legacy.BidID {
 		t.Errorf("imp[%d].id did not translate. OpenRTB %s, legacy %s", index, imp.ID, legacy.BidID)
 	}
@@ -477,10 +487,6 @@ type mockLegacyAdapter struct {
 }
 
 func (a *mockLegacyAdapter) Name() string {
-	return "someBidder"
-}
-
-func (a *mockLegacyAdapter) FamilyName() string {
 	return "someFamily"
 }
 
@@ -488,8 +494,8 @@ func (a *mockLegacyAdapter) SkipNoCookies() bool {
 	return false
 }
 
-func (a *mockLegacyAdapter) GetUsersyncInfo() *pbs.UsersyncInfo {
-	return nil
+func (a *mockLegacyAdapter) GetUsersyncInfo() (*usersync.UsersyncInfo, error) {
+	return nil, nil
 }
 
 func (a *mockLegacyAdapter) Call(ctx context.Context, req *pbs.PBSRequest, bidder *pbs.PBSBidder) (pbs.PBSBidSlice, error) {
